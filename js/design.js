@@ -29,6 +29,8 @@
     { key: "a", cyr: "а", ipa: "a" }, { key: "o", cyr: "о", ipa: "o" }, { key: "u", cyr: "у", ipa: "u" },
   ];
   const ANCHOR_VOWELS = ["i", "e", "a", "o", "u"];   // the five Russian vowel phonemes
+  // neighbours around the vowel space (и–э–а–о–у–и); the у–и midpoint lies in the ы region
+  const RING = ["i", "e", "a", "o", "u"];
 
   // Approximate male Russian stressed-vowel targets (Hz), used ONLY as fallback
   // anchors when a listener gives too few labels for a vowel (Fant 1960, isolated
@@ -86,19 +88,20 @@
   }
 
   // ------------------------------------------------------------------ Part 1 order
-  /* Two interleaved quincunx halves (each covers the whole space evenly, as in
-     Zaslavsky & Arnon's split of the children's sub-grid), half order
-     counterbalanced by seed, random order within a half, then a short
-     repeat block (same label + goodness screen) for test-retest reliability.                     */
+  /* Every token is classified (label + goodness) twice: pass 1 = blocks 1-2, pass 2 =
+     blocks 3-4. Within a pass the grid is split into the two interleaved quincunx halves
+     (each covers the whole space, as in Zaslavsky & Arnon's split sub-grid); half order is
+     counterbalanced by seed and reversed in pass 2; order within a block is random.      */
   function part1Order(G, cfg, rng) {
     const first = rng() < 0.5 ? "A" : "B", second = first === "A" ? "B" : "A";
-    const blocks = [first, second].map((h, bi) =>
-      shuffle(G.filter(g => g.half === h), rng).map(g => ({ block: bi + 1, half: h, grid_index: g.index, kind: "main" })));
-    let all = blocks[0].concat(blocks[1]);
-    if (cfg.TEST_MODE) all = blocks[0].slice(0, cfg.TEST_N_PER_HALF).concat(blocks[1].slice(0, cfg.TEST_N_PER_HALF));
-    const nRep = cfg.TEST_MODE ? 2 : cfg.N_REPEAT;
-    const rep = shuffle(all.slice(), rng).slice(0, nRep).map(t => ({ block: 3, half: t.half, grid_index: t.grid_index, kind: "repeat" }));
-    return { order: all.concat(rep), firstHalf: first };
+    const plan = [[first, 1], [second, 1], [second, 2], [first, 2]];
+    let blocks = plan.map(([h, pass], bi) =>
+      shuffle(G.filter(g => g.half === h), rng).map(g => ({ block: bi + 1, rep: pass, half: h, grid_index: g.index, kind: "main" })));
+    if (cfg.TEST_MODE) blocks = blocks.map(b => b.slice(0, cfg.TEST_N_PER_HALF));
+    // avoid the same token on both sides of the pass boundary
+    const b2 = blocks[1], b3 = blocks[2];
+    if (b2.length && b3.length > 1 && b2[b2.length - 1].grid_index === b3[0].grid_index) [b3[0], b3[1]] = [b3[1], b3[0]];
+    return { order: [].concat(...blocks), firstHalf: first, nBlocks: blocks.length };
   }
 
   // ------------------------------------------------------------------ prototypes
@@ -125,37 +128,69 @@
     return Math.hypot((a[0] - b[0]) / cfg.JND_F1_BARK, (a[1] - b[1]) / cfg.JND_F2_BARK);
   }
 
-  /* Two anchors per vowel: P = the listener's own prototype; N = a poor but
-     still-identified exemplar of the same category (Kuhl 1991 logic): the
-     token labelled with that vowel that has the lowest goodness, at least
-     cfg.MIN_PN_JND from P (ties -> farther from P). Fallbacks are flagged.   */
-  function selectAnchors(identRows, G, cfg) {
-    const protos = prototypes(identRows), anchors = [], warnings = [];
-    const centre = [G.reduce((s, g) => s + g.F1_bark, 0) / G.length, G.reduce((s, g) => s + g.F2_bark, 0) / G.length];
+  /* Prototype of each vowel: the listener's goodness-weighted centroid, or the
+     Fant (1960) reference if the vowel got fewer than MIN_TOKENS_FOR_PROTO labels. */
+  function ownPrototypes(identRows, cfg, warnings) {
+    const protos = prototypes(identRows), P = {};
     for (const v of ANCHOR_VOWELS) {
       const pr = protos[v];
-      let P, pMethod;
-      if (pr.n >= cfg.MIN_TOKENS_FOR_PROTO) { P = [pr.F1_bark, pr.F2_bark]; pMethod = "goodness_centroid"; }
-      else { P = [S.hzToBark(RU_REF_HZ[v][0]), S.hzToBark(RU_REF_HZ[v][1])]; pMethod = "fallback_reference"; warnings.push(v + ": prototype from reference (n=" + pr.n + ")"); }
-      const own = identRows.filter(r => r.kind === "main" && r.label === v);
-      const cand = own.map(r => ({ p: [r.F1_bark, r.F2_bark], g: +r.goodness || 1, gi: r.grid_index }))
-                      .filter(c => jndDist(c.p, P, cfg) >= cfg.MIN_PN_JND);
-      let N, nMethod, nGood = null, nGrid = null;
-      if (cand.length) {
-        cand.sort((a, b) => (a.g - b.g) || (jndDist(b.p, P, cfg) - jndDist(a.p, P, cfg)));
-        N = cand[0].p; nGood = cand[0].g; nGrid = cand[0].gi; nMethod = "lowest_goodness_same_label";
-      } else {
-        // step MIN_PN_JND from P toward the centre of the space
-        const dx = centre[0] - P[0], dy = centre[1] - P[1], dj = jndDist(centre, P, cfg) || 1;
-        N = [P[0] + dx * cfg.MIN_PN_JND / dj, P[1] + dy * cfg.MIN_PN_JND / dj];
-        nMethod = "fallback_toward_centre"; warnings.push(v + ": non-prototype by fallback");
+      if (pr.n >= cfg.MIN_TOKENS_FOR_PROTO) P[v] = { p: [pr.F1_bark, pr.F2_bark], method: "goodness_centroid", n: pr.n, mean_goodness: pr.mean_goodness };
+      else {
+        P[v] = { p: [S.hzToBark(RU_REF_HZ[v][0]), S.hzToBark(RU_REF_HZ[v][1])], method: "fallback_reference", n: pr.n, mean_goodness: pr.mean_goodness == null ? null : pr.mean_goodness };
+        warnings.push(v + ": prototype from reference (n=" + pr.n + ")");
       }
-      anchors.push({ anchor: "P_" + v, vowel: v, kind: "prototype", F1_bark: P[0], F2_bark: P[1], method: pMethod,
-                     n_labels: pr.n, mean_goodness: pr.mean_goodness == null ? null : pr.mean_goodness });
-      anchors.push({ anchor: "N_" + v, vowel: v, kind: "nonprototype", F1_bark: N[0], F2_bark: N[1], method: nMethod,
-                     goodness: nGood, grid_index: nGrid, dist_to_P_jnd: jndDist(N, P, cfg) });
     }
-    return { prototypes: protos, anchors: anchors, warnings: warnings };
+    return { protos, P };
+  }
+
+  /* Anchor designs (cfg.ANCHOR_DESIGN):
+     "midpoint" (default; same logic as the Korean pilot, but built on the listener's
+        OWN prototypes): 5 prototypes P_v + 5 midpoints M_v-w between neighbouring
+        prototypes on the ring и–э–а–о–у–и + 1 centre C (mean of the 5 prototypes) = 11.
+     "nonprototype": 5 prototypes + 5 poor-but-identified exemplars N_v (lowest-goodness
+        token of the same label, >= MIN_PN_JND from P; fallback toward the centre).     */
+  function selectAnchors(identRows, G, cfg) {
+    const warnings = [], anchors = [];
+    const { protos, P } = ownPrototypes(identRows, cfg, warnings);
+    const design = cfg.ANCHOR_DESIGN || "midpoint";
+    for (const v of ANCHOR_VOWELS) {
+      anchors.push({ anchor: "P_" + v, vowel: v, kind: "prototype", F1_bark: P[v].p[0], F2_bark: P[v].p[1], method: P[v].method,
+                     n_labels: P[v].n, mean_goodness: P[v].mean_goodness });
+    }
+    if (design === "midpoint") {
+      for (let i = 0; i < RING.length; i++) {
+        const a = RING[i], b = RING[(i + 1) % RING.length], pa = P[a].p, pb = P[b].p;
+        const m = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
+        const half = jndDist(pa, pb, cfg) / 2;
+        if (half < cfg.MIN_PN_JND) warnings.push(`midpoint ${a}-${b}: only ${half.toFixed(2)} JND from the prototypes`);
+        anchors.push({ anchor: `M_${a}-${b}`, vowel: `${a}|${b}`, kind: "midpoint", F1_bark: m[0], F2_bark: m[1],
+                       method: (P[a].method === "goodness_centroid" && P[b].method === "goodness_centroid") ? "own_prototypes" : "uses_fallback",
+                       dist_to_P_jnd: half });
+      }
+      const c = [0, 1].map(k => ANCHOR_VOWELS.reduce((s, v) => s + P[v].p[k], 0) / ANCHOR_VOWELS.length);
+      anchors.push({ anchor: "C_centre", vowel: "centre", kind: "centre", F1_bark: c[0], F2_bark: c[1], method: "mean_of_prototypes",
+                     dist_to_P_jnd: Math.min(...ANCHOR_VOWELS.map(v => jndDist(c, P[v].p, cfg))) });
+    } else {
+      const centre = [G.reduce((s, g) => s + g.F1_bark, 0) / G.length, G.reduce((s, g) => s + g.F2_bark, 0) / G.length];
+      for (const v of ANCHOR_VOWELS) {
+        const Pv = P[v].p;
+        const cand = identRows.filter(r => r.kind === "main" && r.label === v)
+          .map(r => ({ p: [r.F1_bark, r.F2_bark], g: +r.goodness || 1, gi: r.grid_index }))
+          .filter(c => jndDist(c.p, Pv, cfg) >= cfg.MIN_PN_JND);
+        let N, nMethod, nGood = null, nGrid = null;
+        if (cand.length) {
+          cand.sort((a, b) => (a.g - b.g) || (jndDist(b.p, Pv, cfg) - jndDist(a.p, Pv, cfg)));
+          N = cand[0].p; nGood = cand[0].g; nGrid = cand[0].gi; nMethod = "lowest_goodness_same_label";
+        } else {
+          const dx = centre[0] - Pv[0], dy = centre[1] - Pv[1], dj = jndDist(centre, Pv, cfg) || 1;
+          N = [Pv[0] + dx * cfg.MIN_PN_JND / dj, Pv[1] + dy * cfg.MIN_PN_JND / dj];
+          nMethod = "fallback_toward_centre"; warnings.push(v + ": non-prototype by fallback");
+        }
+        anchors.push({ anchor: "N_" + v, vowel: v, kind: "nonprototype", F1_bark: N[0], F2_bark: N[1], method: nMethod,
+                       goodness: nGood, grid_index: nGrid, dist_to_P_jnd: jndDist(N, Pv, cfg) });
+      }
+    }
+    return { design: design, prototypes: protos, anchors: anchors, warnings: warnings };
   }
 
   // ------------------------------------------------------------------ Part 2 trials
@@ -173,6 +208,9 @@
         const signs = shuffle(Array.from({ length: n }, (_, i) => (i % 2 === 0 ? 1 : -1)), rng);
         let k = 0;
         for (const st of steps) {
+          // odd-interval position balanced within each anchor x direction x step cell
+          // (with REPS = 3: positions 1, 2, 3 once each, in random order)
+          const pos = shuffle(Array.from({ length: cfg.REPS }, (_, i) => 1 + (i % 3)), rng);
           for (let r = 0; r < cfg.REPS; r++, k++) {
             let sign = signs[k], flipped = 0;
             const odd = s => dir === "F1" ? [a.F1_bark + s * st, a.F2_bark] : [a.F1_bark, a.F2_bark + s * st];
@@ -182,7 +220,7 @@
             const o = odd(sign);
             trials.push({ anchor: a.anchor, vowel: a.vowel, kind: a.kind, direction: dir, step_bark: st, rep: r + 1,
                           sign: sign, sign_flipped: flipped, std_F1_bark: a.F1_bark, std_F2_bark: a.F2_bark,
-                          odd_F1_bark: o[0], odd_F2_bark: o[1], odd_pos: 1 + Math.floor(rng() * 3) });
+                          odd_F1_bark: o[0], odd_F2_bark: o[1], odd_pos: pos[r] });
           }
         }
       }
@@ -205,16 +243,17 @@
   function practiceTrials(cfg, rng) {
     const c = [5.1, 10.2], out = [];
     const specs = [["F2", 1.6], ["F1", 1.2], ["F2", 1.2], ["F1", 0.9], ["F2", 0.9], ["F1", 0.7]];
+    const pos = shuffle([1, 2, 3, 1, 2, 3], rng);           // each position twice
     for (const [dir, st] of specs) {
       const sign = rng() < 0.5 ? -1 : 1;
       out.push({ anchor: "practice", vowel: "-", kind: "practice", direction: dir, step_bark: st, rep: 1, sign: sign, sign_flipped: 0,
                  std_F1_bark: c[0], std_F2_bark: c[1], odd_F1_bark: dir === "F1" ? c[0] + sign * st : c[0],
-                 odd_F2_bark: dir === "F2" ? c[1] + sign * st : c[1], odd_pos: 1 + Math.floor(rng() * 3) });
+                 odd_F2_bark: dir === "F2" ? c[1] + sign * st : c[1], odd_pos: pos[out.length] });
     }
     return out;
   }
 
-  const api = { mulberry32, shuffle, LABELS, ANCHOR_VOWELS, RU_REF_HZ, POLY_HZ, POLY, inPolygon, distToPolygonEdge,
+  const api = { mulberry32, shuffle, LABELS, ANCHOR_VOWELS, RING, ownPrototypes, RU_REF_HZ, POLY_HZ, POLY, inPolygon, distToPolygonEdge,
                 inSynthRegion, grid, part1Order, prototypes, jndDist, selectAnchors, part2Trials, practiceTrials };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.VowelDesign = api;

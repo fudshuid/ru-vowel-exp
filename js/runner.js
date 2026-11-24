@@ -164,7 +164,7 @@
       const val = n => { const e = document.querySelector(`input[name="${n}"]:checked`); return e ? e.value : null; };
       const q = { age: $("age").value, gender: val("gender"), native: $("native").value.trim(), region: $("region").value.trim(),
                   other_languages: $("other").value.trim(), hearing: val("hearing"), device: val("device") };
-      if (!q.age || !q.gender || !q.native || !q.hearing || !q.device) { $("msg").textContent = T.q_required; return; }
+      if (!q.age || !q.gender || !q.native || !q.region || !q.hearing || !q.device) { $("msg").textContent = T.q_required; return; }
       st.questionnaire = q; st.stage = "volume"; save(); route();
     };
   }
@@ -293,13 +293,14 @@
     while (P.idx < nMain) {
       const t = P.order[P.idx];
       const r = await classifyTrial(G[t.grid_index], P.idx / nMain);
-      st.ident.push(Object.assign({ sid: st.sid, trial: P.idx + 1, block: t.block, kind: t.kind }, r,
+      st.ident.push(Object.assign({ sid: st.sid, trial: P.idx + 1, block: t.block, rep: t.rep, kind: t.kind }, r,
                     { f3_rule: C.F3_RULE, timestamp: new Date().toISOString(), version: C.EXP_VERSION }));
       P.idx++; save();
       await sleep(250);
       const next = P.order[P.idx];
-      if (next && next.block === 2 && t.block === 1) {
-        html(`${header(T.p1_title)}<p>${T.p1_half}</p><p>${T.press_space}</p><div class="row"><button class="big" id="go">${T.cont}</button></div>`);
+      if (next && next.block !== t.block) {
+        const nb = Math.max(...P.order.map(o => o.block));
+        html(`${header(T.p1_title)}<p>${T.p1_break(t.block, nb)}</p><p>${T.press_space}</p><div class="row"><button class="big" id="go">${T.cont}</button></div>`);
         await waitSpaceOrButton("go");
       }
     }
@@ -395,7 +396,7 @@
       P.idx++; save();
       await sleep(C.ITI_MS);
       if (P.idx < n && P.idx % C.BREAK_EVERY === 0) {
-        html(`${header(T.p2_title)}<p>${T.p2_break(P.idx, n)}</p><div class="row"><button class="big" id="go">${T.cont}</button></div>`);
+        html(`${header(T.p2_title)}<p>${T.p2_break(P.idx / C.BREAK_EVERY, Math.ceil(n / C.BREAK_EVERY))}</p><div class="row"><button class="big" id="go">${T.cont}</button></div>`);
         await waitSpaceOrButton("go");
       }
     }
