@@ -5,7 +5,7 @@ var CONFIG = {
   // ---- data saving: DataPipe (https://pipe.jspsych.org) -> Google Drive / Zenodo / Dataverse (OSF closed to new experiments).
   // Paste the 12-character experiment ID shown on your DataPipe experiment page.
   // While it is "" the experiment runs normally but data are only offered for download.
-  DATAPIPE_ID: "",
+  DATAPIPE_ID: "mwDGBj2fe4N3",
   DATAPIPE_URL: "https://pipe.jspsych.org/api/data/",
 
   // ---- stimuli
